@@ -12,6 +12,14 @@ on:
     - cron: '50 10-20/2 * * 1-6'
   workflow_dispatch:
     inputs:
+      target_env:
+        type: choice
+        description: 'Entorno de destino para la sincronización'
+        options:
+          - QA
+          - PROD
+          - AMBOS
+        default: QA
       gmail_query:
         description: 'Query opcional de Gmail (ej: subject:"Portal Clientes - Precios")'
         required: false
@@ -49,8 +57,11 @@ jobs:
 
       - name: Ejecutar sincronización de precios
         env:
-          BACKEND_SYNC_URL: ${{ secrets.BACKEND_SYNC_URL }}
-          EXTERNAL_SYNC_API_KEY: ${{ secrets.EXTERNAL_SYNC_API_KEY }}
+          TARGET_ENV: ${{ github.event.inputs.target_env || 'AMBOS' }}
+          BACKEND_SYNC_URL_QA: ${{ secrets.BACKEND_SYNC_URL_QA || secrets.BACKEND_SYNC_URL || 'https://qa-api.clientes.carlosisla.com.ar/products/sync' }}
+          EXTERNAL_SYNC_API_KEY_QA: ${{ secrets.EXTERNAL_SYNC_API_KEY_QA || secrets.EXTERNAL_SYNC_API_KEY }}
+          BACKEND_SYNC_URL_PROD: ${{ secrets.BACKEND_SYNC_URL_PROD || secrets.BACKEND_SYNC_URL || 'https://api-clientes.carlosisla.com.ar/products/sync' }}
+          EXTERNAL_SYNC_API_KEY_PROD: ${{ secrets.EXTERNAL_SYNC_API_KEY_PROD || secrets.EXTERNAL_SYNC_API_KEY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           GMAIL_SUBJECT_FILTER: ${{ secrets.GMAIL_SUBJECT_FILTER || 'Portal Clientes - Precios' }}

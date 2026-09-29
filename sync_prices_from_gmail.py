@@ -3,13 +3,10 @@ sync_prices_from_gmail.py
 Bridge: Gmail ➔ Excel ➔ Backend Carlos Isla (/products/sync)
 Carlos Isla y Cía. — Portal Clientes
 
-Flujo:
-    1. Busca en Gmail el email con asunto configurable ("Portal Clientes - Precios")
-       que NO contenga la etiqueta de procesado ("PORTAL_PRECIOS_ACTUALIZADOS").
-    2. Extrae el archivo adjunto (.xlsx o .xls).
-    3. Envía el archivo por POST multipart/form-data al backend Carlos Isla con x-api-key.
-    4. Si el backend responde éxito (HTTP 200), marca el email con el label
-       PORTAL_PRECIOS_ACTUALIZADOS y lo marca como leído (evitando reprocesamientos).
+Soporta múltiples entornos (QA, PROD o AMBOS):
+    - QA: Envía a BACKEND_SYNC_URL_QA
+    - PROD: Envía a BACKEND_SYNC_URL_PROD
+    - AMBOS: Envía a QA y luego a PROD con el mismo archivo
 """
 
 import os
@@ -17,7 +14,6 @@ import sys
 import email
 from email.header import decode_header
 import base64
-import tempfile
 import logging
 import requests
 from dotenv import load_dotenv
@@ -27,9 +23,16 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("sync_prices")
 
-# Variables principales de conexión con el Backend
-BACKEND_SYNC_URL = os.environ.get("BACKEND_SYNC_URL")
-EXTERNAL_SYNC_API_KEY = os.environ.get("EXTERNAL_SYNC_API_KEY")
+# Selección de entorno objetivo: "QA", "PROD" o "AMBOS"
+TARGET_ENV = os.environ.get("TARGET_ENV", "AMBOS").upper().strip()
+
+# Configuración QA
+QA_URL = os.environ.get("BACKEND_SYNC_URL_QA") or os.environ.get("BACKEND_SYNC_URL") or "https://qa-api.clientes.carlosisla.com.ar/products/sync"
+QA_KEY = os.environ.get("EXTERNAL_SYNC_API_KEY_QA") or os.environ.get("EXTERNAL_SYNC_API_KEY")
+
+# Configuración Producción
+PROD_URL = os.environ.get("BACKEND_SYNC_URL_PROD") or os.environ.get("BACKEND_SYNC_URL") or "https://api-clientes.carlosisla.com.ar/products/sync"
+PROD_KEY = os.environ.get("EXTERNAL_SYNC_API_KEY_PROD") or os.environ.get("EXTERNAL_SYNC_API_KEY")
 
 # Asunto y Etiqueta configurables
 ASUNTO_EMAIL = os.environ.get("GMAIL_SUBJECT_FILTER", "Portal Clientes - Precios")
@@ -61,13 +64,13 @@ def decode_mime_words(s):
     return "".join(fragments)
 
 
-def enviar_al_backend(filename: str, file_bytes: bytes) -> bool:
-    """Envía el archivo Excel al endpoint de sincronización del Backend."""
-    if not BACKEND_SYNC_URL or not EXTERNAL_SYNC_API_KEY:
-        log.error("Faltan BACKEND_SYNC_URL o EXTERNAL_SYNC_API_KEY en las variables de entorno.")
+def enviar_a_backend(url: str, api_key: str, env_name: str, filename: str, file_bytes: bytes) -> bool:
+    """Envía el archivo Excel a un backend específico."""
+    if not url or not api_key:
+        log.error(f"[{env_name}] Faltan URL o API Key en las variables de entorno.")
         return False
 
-    log.info(f"Enviando '{filename}' ({len(file_bytes) / 1024:.1f} KB) a {BACKEND_SYNC_URL}...")
+    log.info(f"[{env_name}] Enviando '{filename}' ({len(file_bytes) / 1024:.1f} KB) a {url}...")
     files = {
         "priceList": (
             filename,
@@ -76,28 +79,49 @@ def enviar_al_backend(filename: str, file_bytes: bytes) -> bool:
         )
     }
     headers = {
-        "x-api-key": EXTERNAL_SYNC_API_KEY
+        "x-api-key": api_key
     }
 
     try:
-        response = requests.post(BACKEND_SYNC_URL, files=files, headers=headers, timeout=180)
-        log.info(f"Respuesta HTTP del Backend: {response.status_code}")
+        response = requests.post(url, files=files, headers=headers, timeout=180)
+        log.info(f"[{env_name}] Respuesta HTTP: {response.status_code}")
 
-        if response.status_code == 200 or response.status_code == 201:
+        if response.status_code in [200, 201]:
             data = response.json()
             if data.get("success"):
-                log.info(f"✓ ÉXITO: {data.get('message', 'Sincronización procesada correctamente')}")
-                log.info(f"  Artículos procesados: {data.get('processedCount', 0)}")
+                log.info(f"[{env_name}] ✓ ÉXITO: {data.get('message', 'Sincronización procesada correctamente')}")
+                log.info(f"[{env_name}]   Artículos procesados: {data.get('processedCount', 0)}")
                 return True
             else:
-                log.warning(f"⚠ Finalizó con observaciones: {data.get('message')}")
+                log.warning(f"[{env_name}] ⚠ Finalizó con observaciones: {data.get('message')}")
                 return True
         else:
-            log.error(f"✗ ERROR del Backend ({response.status_code}): {response.text}")
+            log.error(f"[{env_name}] ✗ ERROR ({response.status_code}): {response.text}")
             return False
     except Exception as e:
-        log.error(f"✗ Excepción al conectar con el Backend: {e}")
+        log.error(f"[{env_name}] ✗ Excepción al conectar: {e}")
         return False
+
+
+def sincronizar_en_entornos(filename: str, file_bytes: bytes) -> bool:
+    """Sincroniza según TARGET_ENV ('QA', 'PROD' o 'AMBOS')."""
+    destinos = []
+    if TARGET_ENV in ["QA", "AMBOS"]:
+        destinos.append(("QA", QA_URL, QA_KEY))
+    if TARGET_ENV in ["PROD", "AMBOS"]:
+        destinos.append(("PRODUCCIÓN", PROD_URL, PROD_KEY))
+
+    if not destinos:
+        log.error(f"Valor TARGET_ENV inválido: '{TARGET_ENV}'. Debe ser 'QA', 'PROD' o 'AMBOS'.")
+        return False
+
+    todos_ok = True
+    for env_name, url, key in destinos:
+        ok = enviar_a_backend(url, key, env_name, filename, file_bytes)
+        if not ok:
+            todos_ok = False
+
+    return todos_ok
 
 
 # ==============================================================================
@@ -113,7 +137,7 @@ def ejecutar_con_google_api() -> bool:
         return False
 
     if not os.path.exists(GMAIL_TOKEN_PATH):
-        log.info(f"Archivo de token OAuth '{GMAIL_TOKEN_PATH}' no encontrado. Se omitirá modo OAuth.")
+        log.info(f"Archivo de token OAuth '{GMAIL_TOKEN_PATH}' no encontrado.")
         return False
 
     log.info(f"Iniciando conexión con Google API (OAuth) usando {GMAIL_TOKEN_PATH}...")
@@ -149,6 +173,9 @@ def ejecutar_con_google_api() -> bool:
     mensaje = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
     payload = mensaje.get("payload", {})
 
+    target_data = None
+    target_filename = None
+
     def extraer_adjunto(partes):
         for parte in partes:
             nombre = parte.get("filename", "")
@@ -174,8 +201,8 @@ def ejecutar_con_google_api() -> bool:
         log.warning("No se encontró ningún adjunto .xlsx/.xls en el correo.")
         return False
 
-    # Enviar al backend
-    exito = enviar_al_backend(target_filename, target_data)
+    # Enviar al/los backend(s)
+    exito = sincronizar_en_entornos(target_filename, target_data)
 
     if exito:
         # Marcar con etiqueta de procesado
@@ -223,7 +250,6 @@ def ejecutar_con_imap() -> bool:
     mail_ids = messages[0].split()
 
     if not mail_ids:
-        # Fallback de búsqueda si X-GM-RAW no coincide
         status, messages = mail.search(None, f'(SUBJECT "{ASUNTO_EMAIL}" UNSEEN)')
         mail_ids = messages[0].split()
 
@@ -233,7 +259,6 @@ def ejecutar_con_imap() -> bool:
         mail.logout()
         return True
 
-    # Tomar el correo más reciente
     target_id = mail_ids[-1]
     res, msg_data = mail.fetch(target_id, "(RFC822)")
     mail_message = None
@@ -276,11 +301,10 @@ def ejecutar_con_imap() -> bool:
         mail.logout()
         return False
 
-    exito = enviar_al_backend(target_filename, target_data)
+    exito = sincronizar_en_entornos(target_filename, target_data)
 
     if exito:
         try:
-            # En Gmail IMAP, +X-GM-LABELS agrega la etiqueta especificada
             mail.store(target_id, "+X-GM-LABELS", f"({LABEL_PROCESADO})")
             mail.store(target_id, "+FLAGS", "\\Seen")
             log.info(f"✓ Correo marcado con la etiqueta '{LABEL_PROCESADO}' y como leído.")
@@ -293,11 +317,9 @@ def ejecutar_con_imap() -> bool:
 
 
 def main():
-    if not BACKEND_SYNC_URL or not EXTERNAL_SYNC_API_KEY:
-        log.error("ERROR: Variables de entorno BACKEND_SYNC_URL y EXTERNAL_SYNC_API_KEY son obligatorias.")
-        sys.exit(1)
+    log.info(f"=== Sincronización de Precios iniciada | Entorno(s): {TARGET_ENV} ===")
 
-    # 1. Si existe archivo de token OAuth (estilo NET-LogistK), intentar vía Google API
+    # 1. Si existe archivo de token OAuth, intentar vía Google API
     if os.path.exists(GMAIL_TOKEN_PATH) or os.getenv("GMAIL_TOKEN_JSON"):
         if not os.path.exists(GMAIL_TOKEN_PATH) and os.getenv("GMAIL_TOKEN_JSON"):
             with open(GMAIL_TOKEN_PATH, "w") as f:
