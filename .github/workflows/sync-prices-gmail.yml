@@ -1,0 +1,60 @@
+# Pipeline programado: Gmail ➔ Descarga Lista Precios ➔ Backend Carlos Isla
+# Carlos Isla y Cía. — Portal Clientes
+
+name: Sincronización Automática de Precios desde Gmail
+
+on:
+  schedule:
+    # Argentina (ART) = UTC-3
+    # Ejecuta cada 2 horas de lunes a sábados:
+    # Horario Argentina: 07:50, 09:50, 11:50, 13:50, 15:50, 17:50 ART
+    # En UTC (+3 hs): 10:50, 12:50, 14:50, 16:50, 18:50, 20:50 UTC
+    - cron: '50 10-20/2 * * 1-6'
+  workflow_dispatch:
+    inputs:
+      gmail_query:
+        description: 'Query opcional de Gmail (ej: subject:"Portal Clientes - Precios")'
+        required: false
+        default: ''
+
+jobs:
+  sync-prices:
+    name: Descargar Excel de Gmail y Sincronizar en Backend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          pip install -r requirements.txt
+
+      - name: Restaurar credenciales OAuth si existen
+        env:
+          GMAIL_CREDENTIALS: ${{ secrets.GMAIL_CREDENTIALS_JSON }}
+          GMAIL_TOKEN: ${{ secrets.GMAIL_TOKEN_JSON || secrets.GMAIL_TOKEN_VENTAS_JSON }}
+        run: |
+          if [ -n "$GMAIL_CREDENTIALS" ]; then
+            echo "$GMAIL_CREDENTIALS" > credentials.json
+          fi
+          if [ -n "$GMAIL_TOKEN" ]; then
+            echo "$GMAIL_TOKEN" > token.json
+          fi
+
+      - name: Ejecutar sincronización de precios
+        env:
+          BACKEND_SYNC_URL: ${{ secrets.BACKEND_SYNC_URL }}
+          EXTERNAL_SYNC_API_KEY: ${{ secrets.EXTERNAL_SYNC_API_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          GMAIL_SUBJECT_FILTER: ${{ secrets.GMAIL_SUBJECT_FILTER || 'Portal Clientes - Precios' }}
+          GMAIL_LABEL_PROCESADO: ${{ secrets.GMAIL_LABEL_PROCESADO || 'PORTAL_PRECIOS_ACTUALIZADOS' }}
+          GMAIL_SEARCH_QUERY: ${{ github.event.inputs.gmail_query }}
+        run: |
+          python sync_prices_from_gmail.py
