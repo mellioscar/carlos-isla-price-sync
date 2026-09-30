@@ -57,7 +57,7 @@ jobs:
 
       - name: Ejecutar sincronización de precios
         env:
-          TARGET_ENV: ${{ github.event.inputs.target_env || 'AMBOS' }}
+          TARGET_ENV: ${{ github.event.inputs.target_env || 'QA' }}
           BACKEND_SYNC_URL_QA: ${{ secrets.BACKEND_SYNC_URL_QA || secrets.BACKEND_SYNC_URL || 'https://qa-api.clientes.carlosisla.com.ar/products/sync' }}
           EXTERNAL_SYNC_API_KEY_QA: ${{ secrets.EXTERNAL_SYNC_API_KEY_QA || secrets.EXTERNAL_SYNC_API_KEY }}
           BACKEND_SYNC_URL_PROD: ${{ secrets.BACKEND_SYNC_URL_PROD || secrets.BACKEND_SYNC_URL || 'https://api-clientes.carlosisla.com.ar/products/sync' }}
