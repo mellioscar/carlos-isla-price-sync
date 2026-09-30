@@ -9,7 +9,7 @@ on:
     # Ejecuta cada 2 horas de lunes a sábados:
     # Horario Argentina: 07:50, 09:50, 11:50, 13:50, 15:50, 17:50 ART
     # En UTC (+3 hs): 10:50, 12:50, 14:50, 16:50, 18:50, 20:50 UTC
-    - cron: '50 10-20/2 * * 1-6'
+    - cron: '50 10,12,14,16,18,20 * * 1-6'
   workflow_dispatch:
     inputs:
       target_env:
@@ -57,7 +57,7 @@ jobs:
 
       - name: Ejecutar sincronización de precios
         env:
-          TARGET_ENV: ${{ github.event.inputs.target_env || 'QA' }}
+          TARGET_ENV: ${{ github.event.inputs.target_env || 'AMBOS' }}
           BACKEND_SYNC_URL_QA: ${{ secrets.BACKEND_SYNC_URL_QA || secrets.BACKEND_SYNC_URL || 'https://qa-api.clientes.carlosisla.com.ar/products/sync' }}
           EXTERNAL_SYNC_API_KEY_QA: ${{ secrets.EXTERNAL_SYNC_API_KEY_QA || secrets.EXTERNAL_SYNC_API_KEY }}
           BACKEND_SYNC_URL_PROD: ${{ secrets.BACKEND_SYNC_URL_PROD || secrets.BACKEND_SYNC_URL || 'https://api-clientes.carlosisla.com.ar/products/sync' }}
