@@ -64,6 +64,18 @@ def decode_mime_words(s):
     return "".join(fragments)
 
 
+def _loguear_errores_backend(env_name: str, data: dict, maximo: int = 5) -> None:
+    """Muestra en el log las primeras filas con error que devolvió el backend."""
+    errores = data.get("errors") or []
+    for err in errores[:maximo]:
+        log.warning(
+            f"[{env_name}]   Fila {err.get('row')} código '{err.get('code')}' "
+            f"({err.get('field')}): {err.get('message')}"
+        )
+    if len(errores) > maximo:
+        log.warning(f"[{env_name}]   ... y {len(errores) - maximo} observaciones más.")
+
+
 def enviar_a_backend(url: str, api_key: str, env_name: str, filename: str, file_bytes: bytes) -> bool:
     """Envía el archivo Excel a un backend específico."""
     if not url or not api_key:
@@ -88,13 +100,32 @@ def enviar_a_backend(url: str, api_key: str, env_name: str, filename: str, file_
 
         if response.status_code in [200, 201]:
             data = response.json()
+            procesados = data.get("processedCount", 0) or 0
+
+            # Un HTTP 200 sin artículos procesados no es un éxito: si se diera por bueno,
+            # el correo quedaría etiquetado como procesado y nunca se reintentaría.
+            if procesados == 0:
+                log.error(f"[{env_name}] ✗ El backend no procesó ningún artículo: {data.get('message')}")
+                _loguear_errores_backend(env_name, data)
+                return False
+
             if data.get("success"):
                 log.info(f"[{env_name}] ✓ ÉXITO: {data.get('message', 'Sincronización procesada correctamente')}")
-                log.info(f"[{env_name}]   Artículos procesados: {data.get('processedCount', 0)}")
-                return True
+                log.info(f"[{env_name}]   Artículos procesados: {procesados}")
             else:
                 log.warning(f"[{env_name}] ⚠ Finalizó con observaciones: {data.get('message')}")
-                return True
+                log.warning(f"[{env_name}]   Artículos procesados: {procesados}")
+                _loguear_errores_backend(env_name, data)
+
+            # El backend ya no crea ni quita artículos: informa las diferencias para que decida el admin.
+            dif = data.get("differences") or {}
+            nuevos, ausentes = dif.get("newInFile", 0), dif.get("missingInFile", 0)
+            if nuevos or ausentes:
+                log.warning(
+                    f"[{env_name}]   Diferencias para el administrador: {nuevos} códigos del Excel no existen "
+                    f"en el portal y {ausentes} artículos activos no están en el Excel (revisar en el portal)."
+                )
+            return True
         else:
             log.error(f"[{env_name}] ✗ ERROR ({response.status_code}): {response.text}")
             return False
@@ -127,9 +158,38 @@ def sincronizar_en_entornos(filename: str, file_bytes: bytes) -> bool:
 # ==============================================================================
 # MOTOR 1: Google API v1 con OAuth (Idéntico a NET-LogistK)
 # ==============================================================================
+def _listar_mensajes_pendientes(service, query: str) -> list:
+    """Devuelve todos los correos que cumplen la query, del más reciente al más antiguo."""
+    mensajes = []
+    page_token = None
+    while True:
+        result = service.users().messages().list(
+            userId="me", q=query, maxResults=500, pageToken=page_token
+        ).execute()
+        mensajes.extend(result.get("messages", []))
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            return mensajes
+
+
+def _obtener_o_crear_label(service) -> str:
+    """Devuelve el id de la etiqueta de 'procesado', creándola si no existe."""
+    labels = service.users().labels().list(userId="me").execute().get("labels", [])
+    label_id = next((l["id"] for l in labels if l["name"] == LABEL_PROCESADO), None)
+    if not label_id:
+        nuevo = service.users().labels().create(
+            userId="me",
+            body={"name": LABEL_PROCESADO, "labelListVisibility": "labelShow"},
+        ).execute()
+        label_id = nuevo["id"]
+        log.info(f"Etiqueta creada en Gmail: {LABEL_PROCESADO}")
+    return label_id
+
+
 def ejecutar_con_google_api() -> bool:
     try:
         from google.oauth2.credentials import Credentials
+        from google.auth.exceptions import RefreshError
         from google.auth.transport.requests import Request
         from googleapiclient.discovery import build
     except ImportError:
@@ -147,7 +207,16 @@ def ejecutar_con_google_api() -> bool:
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             log.info("Token expirado ➔ Refrescando token OAuth...")
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except RefreshError as e:
+                log.error(
+                    f"No se pudo refrescar el token OAuth de Gmail: {e}\n"
+                    "Si el error es 'invalid_grant', el refresh token venció o fue revocado "
+                    "(pasa a los 7 días si la app de Google Cloud está en modo 'Testing'). "
+                    "Regenerar token.json y actualizar el secret GMAIL_TOKEN_JSON en GitHub."
+                )
+                return False
             with open(GMAIL_TOKEN_PATH, "w") as f:
                 f.write(creds.to_json())
             with open("TOKEN_REFRESHED", "w") as f:
@@ -160,15 +229,18 @@ def ejecutar_con_google_api() -> bool:
 
     query = GMAIL_SEARCH_QUERY or f'subject:"{ASUNTO_EMAIL}" -label:{LABEL_PROCESADO} has:attachment'
     log.info(f"Buscando correo con query: {query}")
-    result = service.users().messages().list(userId="me", q=query, maxResults=1).execute()
-    msgs = result.get("messages", [])
+    msgs = _listar_mensajes_pendientes(service, query)
 
     if not msgs:
         log.info(f"No hay correos pendientes con asunto '{ASUNTO_EMAIL}' sin la etiqueta '{LABEL_PROCESADO}'.")
         return True
 
+    # Gmail devuelve primero el más reciente: ese es el que se sincroniza.
     msg_id = msgs[0]["id"]
+    ids_anteriores = [m["id"] for m in msgs[1:]]
     log.info(f"Correo encontrado (ID: {msg_id}). Obteniendo adjunto...")
+    if ids_anteriores and not GMAIL_SEARCH_QUERY:
+        log.info(f"Hay {len(ids_anteriores)} correo(s) anteriores pendientes que se descartarán tras el sync.")
 
     mensaje = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
     payload = mensaje.get("payload", {})
@@ -207,15 +279,7 @@ def ejecutar_con_google_api() -> bool:
     if exito:
         # Marcar con etiqueta de procesado
         try:
-            labels = service.users().labels().list(userId="me").execute().get("labels", [])
-            label_id = next((l["id"] for l in labels if l["name"] == LABEL_PROCESADO), None)
-            if not label_id:
-                nuevo = service.users().labels().create(
-                    userId="me",
-                    body={"name": LABEL_PROCESADO, "labelListVisibility": "labelShow"},
-                ).execute()
-                label_id = nuevo["id"]
-                log.info(f"Etiqueta creada en Gmail: {LABEL_PROCESADO}")
+            label_id = _obtener_o_crear_label(service)
 
             service.users().messages().modify(
                 userId="me",
@@ -223,6 +287,18 @@ def ejecutar_con_google_api() -> bool:
                 body={"addLabelIds": [label_id], "removeLabelIds": ["UNREAD"]},
             ).execute()
             log.info(f"✓ Correo marcado con la etiqueta '{LABEL_PROCESADO}' y como leído.")
+
+            # Los correos más viejos con el mismo asunto traen listas de precios desactualizadas:
+            # si quedaran sin etiqueta, las próximas ejecuciones las tomarían de a una y el
+            # backend pisaría los precios vigentes. Solo aplica a la búsqueda automática; con una
+            # query manual (workflow_dispatch) se respeta exactamente el correo pedido.
+            if ids_anteriores and not GMAIL_SEARCH_QUERY:
+                for i in range(0, len(ids_anteriores), 1000):
+                    service.users().messages().batchModify(
+                        userId="me",
+                        body={"ids": ids_anteriores[i:i + 1000], "addLabelIds": [label_id]},
+                    ).execute()
+                log.info(f"✓ {len(ids_anteriores)} correo(s) anteriores marcados como procesados (descartados).")
         except Exception as e:
             log.warning(f"No se pudo aplicar la etiqueta de procesado en Gmail: {e}")
 
@@ -308,6 +384,14 @@ def ejecutar_con_imap() -> bool:
             mail.store(target_id, "+X-GM-LABELS", f"({LABEL_PROCESADO})")
             mail.store(target_id, "+FLAGS", "\\Seen")
             log.info(f"✓ Correo marcado con la etiqueta '{LABEL_PROCESADO}' y como leído.")
+
+            # IMAP devuelve los ids en orden ascendente: el último es el más reciente.
+            # Los anteriores traen listas viejas y se descartan (ver nota en el motor OAuth).
+            ids_anteriores = [i for i in mail_ids if i != target_id]
+            if ids_anteriores and not GMAIL_SEARCH_QUERY:
+                for mid in ids_anteriores:
+                    mail.store(mid, "+X-GM-LABELS", f"({LABEL_PROCESADO})")
+                log.info(f"✓ {len(ids_anteriores)} correo(s) anteriores marcados como procesados (descartados).")
         except Exception as e:
             log.warning(f"No se pudo aplicar la etiqueta por IMAP: {e}")
 

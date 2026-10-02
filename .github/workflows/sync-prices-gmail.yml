@@ -25,10 +25,17 @@ on:
         required: false
         default: ''
 
+# Evita que dos ejecuciones (cron + manual) procesen el mismo correo a la vez.
+# Sin cancelar la que está corriendo: una sincronización a medias no debe interrumpirse.
+concurrency:
+  group: sync-prices
+  cancel-in-progress: false
+
 jobs:
   sync-prices:
     name: Descargar Excel de Gmail y Sincronizar en Backend
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout código
         uses: actions/checkout@v4

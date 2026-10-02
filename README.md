@@ -13,11 +13,14 @@ Descarga automáticamente la lista de precios más reciente en formato Excel env
    - Extrae el archivo `.xlsx` o `.xls` adjunto (ejemplo: `Lista de Precios Con Stock UM Pred. Vta..xlsx`).
 3. **Sincronización en Backend**: 
    - Realiza una petición HTTP `POST /products/sync` (multipart/form-data) autenticada mediante el encabezado `x-api-key`.
-   - El backend procesa en bloque (*Bulk Upsert*) los precios, coeficientes y stocks de miles de artículos en segundos sin tiempo de inactividad.
+   - El backend actualiza **solo los precios** de los artículos que **ya existen** en el portal (el stock se toma de NET-LogistK, no del Excel), comparando el código como texto exacto (respeta ceros a la izquierda, barras y guiones). No crea ni quita artículos y no modifica nombre ni estado.
+   - Las diferencias (códigos del Excel que no existen en el portal y artículos activos que no vinieron en el Excel) quedan en un informe que el administrador revisa en **Gestión de productos ➔ Diferencias**, donde decide qué agregar, desactivar o eliminar. El log del workflow también las informa.
+   - Si ningún código del Excel coincide con el portal (archivo o columna equivocados), la sincronización falla y el correo no se etiqueta.
 4. **Etiquetado y Auditoría**: 
-   - Si el backend responde con éxito (`HTTP 200` y `success: true`):
+   - Si el backend responde con éxito (`HTTP 200` con al menos un artículo actualizado):
      - Crea la etiqueta `PORTAL_PRECIOS_ACTUALIZADOS` en Gmail si no existe.
      - Marca el correo con esa etiqueta y lo marca como leído (evitando reprocesar el mismo correo en las siguientes ejecuciones).
+     - Marca también como procesados los correos **más viejos** con el mismo asunto que hubieran quedado pendientes: traen listas desactualizadas y, si no, se procesarían en las corridas siguientes pisando los precios vigentes (no aplica a búsquedas manuales con `gmail_query`).
      - El backend guarda en la tabla `AppConfig` la fecha exacta, estado `SUCCESS`, origen `GITHUB_ACTIONS_GMAIL` y total de filas sincronizadas, que se reflejan en tiempo real en la pantalla de Configuración del Administrador (`/dashboard/admin-config`).
 
 ---
