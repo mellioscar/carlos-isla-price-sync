@@ -6,7 +6,8 @@ name: Sincronización Automática de Precios desde Gmail
 on:
   schedule:
     # Argentina (ART) = UTC-3
-    # Ejecuta cada 2 horas de lunes a sábados:
+    # Ejecuta cada 2 horas de lunes a sábados, SOLO para PRODUCCIÓN (QA es un entorno de prueba:
+    # se actualiza manualmente con "Run workflow" eligiendo QA):
     # Horario Argentina: 07:50, 09:50, 11:50, 13:50, 15:50, 17:50 ART
     # En UTC (+3 hs): 10:50, 12:50, 14:50, 16:50, 18:50, 20:50 UTC
     # OJO: el schedule de GitHub es "best effort": se atrasa y a veces se saltea corridas.
@@ -22,7 +23,7 @@ on:
           - QA
           - PROD
           - AMBOS
-        default: AMBOS
+        default: QA
       gmail_query:
         description: 'Query opcional de Gmail (ej: subject:"Portal Clientes - Precios")'
         required: false
@@ -67,7 +68,8 @@ jobs:
 
       - name: Ejecutar sincronización de precios
         env:
-          TARGET_ENV: ${{ github.event.inputs.target_env || 'AMBOS' }}
+          # Programado (schedule / EventBridge sin input): solo PRODUCCIÓN. QA se actualiza a mano.
+          TARGET_ENV: ${{ github.event.inputs.target_env || 'PROD' }}
           BACKEND_SYNC_URL_QA: ${{ secrets.BACKEND_SYNC_URL_QA || secrets.BACKEND_SYNC_URL || 'https://qa-api.clientes.carlosisla.com.ar/products/sync' }}
           EXTERNAL_SYNC_API_KEY_QA: ${{ secrets.EXTERNAL_SYNC_API_KEY_QA || secrets.EXTERNAL_SYNC_API_KEY }}
           BACKEND_SYNC_URL_PROD: ${{ secrets.BACKEND_SYNC_URL_PROD || secrets.BACKEND_SYNC_URL || 'https://api-clientes.carlosisla.com.ar/products/sync' }}

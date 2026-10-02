@@ -41,12 +41,12 @@ El pipeline puede sincronizar indistintamente en **QA**, **Producción** o en **
     ```yaml
     - cron: '50 10-20/2 * * 1-6' # 10:50, 12:50, 14:50, 16:50, 18:50, 20:50 UTC (UTC-3 = ART)
     ```
-  - En las ejecuciones automáticas sincroniza para `AMBOS` entornos.
+  - Las ejecuciones automáticas sincronizan **solo Producción**. QA es un entorno de prueba: se actualiza a mano (**Run workflow → QA**), cuando se quiera probar.
   - **El `schedule` de GitHub no es puntual** (se atrasa horas y a veces se saltea corridas). Para horarios exactos, el disparo lo hace **AWS EventBridge Scheduler** (zona `America/Argentina/Buenos_Aires`, 07:50 a 17:50 cada 2 h, lun–sáb) llamando a:
     ```
     POST https://api.github.com/repos/mellioscar/carlos-isla-price-sync/actions/workflows/sync-prices-gmail.yml/dispatches
     Authorization: Bearer <fine-grained token, solo 'Actions: write' en este repo>
-    {"ref": "main", "inputs": {"target_env": "AMBOS"}}
+    {"ref": "main", "inputs": {"target_env": "PROD"}}
     ```
     El cron de GitHub queda como respaldo.
 
