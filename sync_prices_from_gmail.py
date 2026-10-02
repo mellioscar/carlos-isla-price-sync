@@ -6,7 +6,10 @@ Carlos Isla y Cía. — Portal Clientes
 Soporta múltiples entornos (QA, PROD o AMBOS):
     - QA: Envía a BACKEND_SYNC_URL_QA
     - PROD: Envía a BACKEND_SYNC_URL_PROD
-    - AMBOS: Envía a QA y luego a PROD con el mismo archivo
+    - AMBOS: Envía a QA y luego a PROD
+
+Cada entorno tiene su propia etiqueta de Gmail (PORTAL_PRECIOS_QA / PORTAL_PRECIOS_PROD):
+un correo se considera procesado por entorno, no globalmente.
 """
 
 import os
@@ -37,6 +40,9 @@ PROD_KEY = os.environ.get("EXTERNAL_SYNC_API_KEY_PROD") or os.environ.get("EXTER
 # Asunto y Etiqueta configurables
 ASUNTO_EMAIL = os.environ.get("GMAIL_SUBJECT_FILTER", "Portal Clientes - Precios")
 LABEL_PROCESADO = os.environ.get("GMAIL_LABEL_PROCESADO", "PORTAL_PRECIOS_ACTUALIZADOS")
+# Etiqueta propia por entorno (PORTAL_PRECIOS_ACTUALIZADOS queda como histórica: cuenta como procesado para QA)
+LABEL_QA = os.environ.get("GMAIL_LABEL_QA", "PORTAL_PRECIOS_QA")
+LABEL_PROD = os.environ.get("GMAIL_LABEL_PROD", "PORTAL_PRECIOS_PROD")
 GMAIL_SEARCH_QUERY = os.environ.get("GMAIL_SEARCH_QUERY", "").strip()
 
 # Credenciales OAuth (Google API v1 - como en NET-LogistK)
@@ -134,25 +140,31 @@ def enviar_a_backend(url: str, api_key: str, env_name: str, filename: str, file_
         return False
 
 
-def sincronizar_en_entornos(filename: str, file_bytes: bytes) -> bool:
-    """Sincroniza según TARGET_ENV ('QA', 'PROD' o 'AMBOS')."""
+def entornos_destino() -> list:
+    """
+    Entornos a sincronizar según TARGET_ENV, con la etiqueta de Gmail propia de cada uno.
+
+    Cada entorno lleva su propia etiqueta de "procesado": así una corrida solo-QA no deja a PROD
+    sin la lista, y una falla en un entorno no impide avanzar al otro.
+    `excluir` son etiquetas que también cuentan como "ya procesado" para ese entorno: la etiqueta
+    histórica única (LABEL_PROCESADO) solo se aplicó a corridas que siempre incluyeron QA.
+    """
     destinos = []
     if TARGET_ENV in ["QA", "AMBOS"]:
-        destinos.append(("QA", QA_URL, QA_KEY))
+        destinos.append({"nombre": "QA", "url": QA_URL, "key": QA_KEY, "label": LABEL_QA, "excluir": [LABEL_QA, LABEL_PROCESADO]})
     if TARGET_ENV in ["PROD", "AMBOS"]:
-        destinos.append(("PRODUCCIÓN", PROD_URL, PROD_KEY))
-
+        destinos.append({"nombre": "PRODUCCIÓN", "url": PROD_URL, "key": PROD_KEY, "label": LABEL_PROD, "excluir": [LABEL_PROD]})
     if not destinos:
         log.error(f"Valor TARGET_ENV inválido: '{TARGET_ENV}'. Debe ser 'QA', 'PROD' o 'AMBOS'.")
-        return False
+    return destinos
 
-    todos_ok = True
-    for env_name, url, key in destinos:
-        ok = enviar_a_backend(url, key, env_name, filename, file_bytes)
-        if not ok:
-            todos_ok = False
 
-    return todos_ok
+def query_para(destino: dict) -> str:
+    """Query de Gmail del entorno: correos con el asunto y adjunto que ese entorno todavía no procesó."""
+    if GMAIL_SEARCH_QUERY:
+        return GMAIL_SEARCH_QUERY  # búsqueda manual: se respeta tal cual
+    excluir = " ".join(f"-label:{l}" for l in destino["excluir"])
+    return f'subject:"{ASUNTO_EMAIL}" {excluir} has:attachment'
 
 
 # ==============================================================================
@@ -172,18 +184,43 @@ def _listar_mensajes_pendientes(service, query: str) -> list:
             return mensajes
 
 
-def _obtener_o_crear_label(service) -> str:
-    """Devuelve el id de la etiqueta de 'procesado', creándola si no existe."""
+def _obtener_o_crear_label(service, nombre: str) -> str:
+    """Devuelve el id de la etiqueta indicada, creándola si no existe."""
     labels = service.users().labels().list(userId="me").execute().get("labels", [])
-    label_id = next((l["id"] for l in labels if l["name"] == LABEL_PROCESADO), None)
+    label_id = next((l["id"] for l in labels if l["name"] == nombre), None)
     if not label_id:
         nuevo = service.users().labels().create(
             userId="me",
-            body={"name": LABEL_PROCESADO, "labelListVisibility": "labelShow"},
+            body={"name": nombre, "labelListVisibility": "labelShow"},
         ).execute()
         label_id = nuevo["id"]
-        log.info(f"Etiqueta creada en Gmail: {LABEL_PROCESADO}")
+        log.info(f"Etiqueta creada en Gmail: {nombre}")
     return label_id
+
+
+def _descargar_adjunto_excel(service, msg_id: str):
+    """(nombre, bytes) del primer adjunto .xlsx/.xls del correo, o (None, None)."""
+    mensaje = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
+    payload = mensaje.get("payload", {})
+
+    def extraer(partes):
+        for parte in partes:
+            nombre = parte.get("filename", "")
+            if nombre.lower().endswith((".xlsx", ".xls")):
+                att_id = parte.get("body", {}).get("attachmentId")
+                if att_id:
+                    raw = service.users().messages().attachments().get(
+                        userId="me", messageId=msg_id, id=att_id
+                    ).execute()
+                    return nombre, base64.urlsafe_b64decode(raw["data"])
+            subpartes = parte.get("parts", [])
+            if subpartes:
+                res = extraer(subpartes)
+                if res and res[0]:
+                    return res
+        return None, None
+
+    return extraer(payload.get("parts", [payload]))
 
 
 def ejecutar_con_google_api() -> bool:
@@ -227,87 +264,96 @@ def ejecutar_con_google_api() -> bool:
 
     service = build("gmail", "v1", credentials=creds)
 
-    query = GMAIL_SEARCH_QUERY or f'subject:"{ASUNTO_EMAIL}" -label:{LABEL_PROCESADO} has:attachment'
-    log.info(f"Buscando correo con query: {query}")
-    msgs = _listar_mensajes_pendientes(service, query)
-
-    if not msgs:
-        log.info(f"No hay correos pendientes con asunto '{ASUNTO_EMAIL}' sin la etiqueta '{LABEL_PROCESADO}'.")
-        return True
-
-    # Gmail devuelve primero el más reciente: ese es el que se sincroniza.
-    msg_id = msgs[0]["id"]
-    ids_anteriores = [m["id"] for m in msgs[1:]]
-    log.info(f"Correo encontrado (ID: {msg_id}). Obteniendo adjunto...")
-    if ids_anteriores and not GMAIL_SEARCH_QUERY:
-        log.info(f"Hay {len(ids_anteriores)} correo(s) anteriores pendientes que se descartarán tras el sync.")
-
-    mensaje = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
-    payload = mensaje.get("payload", {})
-
-    target_data = None
-    target_filename = None
-
-    def extraer_adjunto(partes):
-        for parte in partes:
-            nombre = parte.get("filename", "")
-            if nombre.lower().endswith((".xlsx", ".xls")):
-                att_id = parte.get("body", {}).get("attachmentId")
-                if att_id:
-                    raw = service.users().messages().attachments().get(
-                        userId="me", messageId=msg_id, id=att_id
-                    ).execute()
-                    data = base64.urlsafe_b64decode(raw["data"])
-                    return nombre, data
-
-            subpartes = parte.get("parts", [])
-            if subpartes:
-                res = extraer_adjunto(subpartes)
-                if res:
-                    return res
-        return None, None
-
-    target_filename, target_data = extraer_adjunto(payload.get("parts", [payload]))
-
-    if not target_filename or not target_data:
-        log.warning("No se encontró ningún adjunto .xlsx/.xls en el correo.")
+    destinos = entornos_destino()
+    if not destinos:
         return False
 
-    # Enviar al/los backend(s)
-    exito = sincronizar_en_entornos(target_filename, target_data)
+    adjuntos = {}  # msg_id ➔ (nombre, bytes): si ambos entornos usan el mismo correo, se descarga una vez
+    todos_ok = True
 
-    if exito:
-        # Marcar con etiqueta de procesado
+    for destino in destinos:
+        env = destino["nombre"]
+        query = query_para(destino)
+        log.info(f"[{env}] Buscando correo con query: {query}")
+        msgs = _listar_mensajes_pendientes(service, query)
+
+        if not msgs:
+            log.info(f"[{env}] No hay correos pendientes para este entorno (etiqueta '{destino['label']}').")
+            continue
+
+        # Gmail devuelve primero el más reciente: ese es el que se sincroniza.
+        msg_id = msgs[0]["id"]
+        ids_anteriores = [m["id"] for m in msgs[1:]]
+        log.info(f"[{env}] Correo encontrado (ID: {msg_id}).")
+        if ids_anteriores and not GMAIL_SEARCH_QUERY:
+            log.info(f"[{env}] Hay {len(ids_anteriores)} correo(s) anteriores pendientes que se descartarán tras el sync.")
+
+        if msg_id not in adjuntos:
+            adjuntos[msg_id] = _descargar_adjunto_excel(service, msg_id)
+        nombre, datos = adjuntos[msg_id]
+        if not nombre or not datos:
+            log.warning(f"[{env}] No se encontró ningún adjunto .xlsx/.xls en el correo.")
+            todos_ok = False
+            continue
+
+        if not enviar_a_backend(destino["url"], destino["key"], env, nombre, datos):
+            todos_ok = False
+            continue
+
         try:
-            label_id = _obtener_o_crear_label(service)
-
+            label_id = _obtener_o_crear_label(service, destino["label"])
             service.users().messages().modify(
                 userId="me",
                 id=msg_id,
                 body={"addLabelIds": [label_id], "removeLabelIds": ["UNREAD"]},
             ).execute()
-            log.info(f"✓ Correo marcado con la etiqueta '{LABEL_PROCESADO}' y como leído.")
+            log.info(f"[{env}] ✓ Correo marcado con la etiqueta '{destino['label']}'.")
 
-            # Los correos más viejos con el mismo asunto traen listas de precios desactualizadas:
-            # si quedaran sin etiqueta, las próximas ejecuciones las tomarían de a una y el
-            # backend pisaría los precios vigentes. Solo aplica a la búsqueda automática; con una
-            # query manual (workflow_dispatch) se respeta exactamente el correo pedido.
+            # Los correos más viejos traen listas desactualizadas: si quedaran sin la etiqueta de este
+            # entorno, las próximas corridas las tomarían de a una y pisarían los precios vigentes.
+            # Con una query manual (workflow_dispatch) se respeta exactamente el correo pedido.
             if ids_anteriores and not GMAIL_SEARCH_QUERY:
                 for i in range(0, len(ids_anteriores), 1000):
                     service.users().messages().batchModify(
                         userId="me",
                         body={"ids": ids_anteriores[i:i + 1000], "addLabelIds": [label_id]},
                     ).execute()
-                log.info(f"✓ {len(ids_anteriores)} correo(s) anteriores marcados como procesados (descartados).")
+                log.info(f"[{env}] ✓ {len(ids_anteriores)} correo(s) anteriores marcados como procesados (descartados).")
         except Exception as e:
-            log.warning(f"No se pudo aplicar la etiqueta de procesado en Gmail: {e}")
+            log.warning(f"[{env}] No se pudo aplicar la etiqueta de procesado en Gmail: {e}")
 
-    return exito
+    return todos_ok
 
 
 # ==============================================================================
 # MOTOR 2: IMAP SSL (con App Password de Gmail)
 # ==============================================================================
+def _leer_adjunto_imap(mail, target_id):
+    """(nombre, bytes) del primer adjunto .xlsx/.xls del correo IMAP, o (None, None)."""
+    res, msg_data = mail.fetch(target_id, "(RFC822)")
+    mail_message = None
+    for response_part in msg_data:
+        if isinstance(response_part, tuple):
+            mail_message = email.message_from_bytes(response_part[1])
+            break
+    if not mail_message:
+        return None, None
+
+    subject = decode_mime_words(mail_message.get("Subject", ""))
+    sender = decode_mime_words(mail_message.get("From", ""))
+    log.info(f"Correo seleccionado: '{subject}' de {sender}")
+
+    for part in mail_message.walk():
+        if part.get_content_maintype() == "multipart" or part.get("Content-Disposition") is None:
+            continue
+        filename = part.get_filename()
+        if filename:
+            filename = decode_mime_words(filename)
+            if filename.lower().endswith((".xlsx", ".xls")):
+                return filename, part.get_payload(decode=True)
+    return None, None
+
+
 def ejecutar_con_imap() -> bool:
     if not GMAIL_USER or not GMAIL_APP_PASSWORD:
         log.error("Modo IMAP: Faltan GMAIL_USER o GMAIL_APP_PASSWORD.")
@@ -320,84 +366,51 @@ def ejecutar_con_imap() -> bool:
     mail.login(GMAIL_USER, GMAIL_APP_PASSWORD)
     mail.select("INBOX")
 
-    query = GMAIL_SEARCH_QUERY or f'X-GM-RAW "subject:\"{ASUNTO_EMAIL}\" -label:{LABEL_PROCESADO} has:attachment"'
-    log.info(f"Buscando por IMAP con query: {query}")
-    status, messages = mail.search(None, query)
-    mail_ids = messages[0].split()
+    destinos = entornos_destino()
+    todos_ok = bool(destinos)
+    adjuntos = {}
 
-    if not mail_ids:
-        status, messages = mail.search(None, f'(SUBJECT "{ASUNTO_EMAIL}" UNSEEN)')
+    for destino in destinos:
+        env = destino["nombre"]
+        gm_query = query_para(destino)
+        query = gm_query if GMAIL_SEARCH_QUERY else f'X-GM-RAW "{gm_query.replace(chr(34), chr(92) + chr(34))}"'
+        log.info(f"[{env}] Buscando por IMAP con query: {query}")
+        status, messages = mail.search(None, query)
         mail_ids = messages[0].split()
 
-    if not mail_ids:
-        log.info(f"No hay correos pendientes con asunto '{ASUNTO_EMAIL}' sin la etiqueta '{LABEL_PROCESADO}'.")
-        mail.close()
-        mail.logout()
-        return True
-
-    target_id = mail_ids[-1]
-    res, msg_data = mail.fetch(target_id, "(RFC822)")
-    mail_message = None
-
-    for response_part in msg_data:
-        if isinstance(response_part, tuple):
-            mail_message = email.message_from_bytes(response_part[1])
-            break
-
-    if not mail_message:
-        log.error("No se pudo leer el contenido del correo.")
-        mail.close()
-        mail.logout()
-        return False
-
-    subject = decode_mime_words(mail_message.get("Subject", ""))
-    sender = decode_mime_words(mail_message.get("From", ""))
-    log.info(f"Correo seleccionado: '{subject}' de {sender}")
-
-    target_data = None
-    target_filename = None
-
-    for part in mail_message.walk():
-        if part.get_content_maintype() == "multipart":
-            continue
-        if part.get("Content-Disposition") is None:
+        if not mail_ids:
+            log.info(f"[{env}] No hay correos pendientes para este entorno (etiqueta '{destino['label']}').")
             continue
 
-        filename = part.get_filename()
-        if filename:
-            filename = decode_mime_words(filename)
-            if filename.lower().endswith((".xlsx", ".xls")):
-                target_filename = filename
-                target_data = part.get_payload(decode=True)
-                break
+        # IMAP devuelve los ids en orden ascendente: el último es el más reciente.
+        target_id = mail_ids[-1]
+        if target_id not in adjuntos:
+            adjuntos[target_id] = _leer_adjunto_imap(mail, target_id)
+        nombre, datos = adjuntos[target_id]
+        if not nombre or not datos:
+            log.warning(f"[{env}] No se encontró adjunto Excel (.xlsx/.xls) en el mensaje.")
+            todos_ok = False
+            continue
 
-    if not target_filename or not target_data:
-        log.warning("No se encontró adjunto Excel (.xlsx/.xls) en el mensaje.")
-        mail.close()
-        mail.logout()
-        return False
+        if not enviar_a_backend(destino["url"], destino["key"], env, nombre, datos):
+            todos_ok = False
+            continue
 
-    exito = sincronizar_en_entornos(target_filename, target_data)
-
-    if exito:
         try:
-            mail.store(target_id, "+X-GM-LABELS", f"({LABEL_PROCESADO})")
+            mail.store(target_id, "+X-GM-LABELS", f"({destino['label']})")
             mail.store(target_id, "+FLAGS", "\\Seen")
-            log.info(f"✓ Correo marcado con la etiqueta '{LABEL_PROCESADO}' y como leído.")
-
-            # IMAP devuelve los ids en orden ascendente: el último es el más reciente.
-            # Los anteriores traen listas viejas y se descartan (ver nota en el motor OAuth).
+            log.info(f"[{env}] ✓ Correo marcado con la etiqueta '{destino['label']}'.")
             ids_anteriores = [i for i in mail_ids if i != target_id]
             if ids_anteriores and not GMAIL_SEARCH_QUERY:
                 for mid in ids_anteriores:
-                    mail.store(mid, "+X-GM-LABELS", f"({LABEL_PROCESADO})")
-                log.info(f"✓ {len(ids_anteriores)} correo(s) anteriores marcados como procesados (descartados).")
+                    mail.store(mid, "+X-GM-LABELS", f"({destino['label']})")
+                log.info(f"[{env}] ✓ {len(ids_anteriores)} correo(s) anteriores marcados como procesados (descartados).")
         except Exception as e:
-            log.warning(f"No se pudo aplicar la etiqueta por IMAP: {e}")
+            log.warning(f"[{env}] No se pudo aplicar la etiqueta por IMAP: {e}")
 
     mail.close()
     mail.logout()
-    return exito
+    return todos_ok
 
 
 def main():

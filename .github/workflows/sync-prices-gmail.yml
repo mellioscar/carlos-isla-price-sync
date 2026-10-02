@@ -9,6 +9,9 @@ on:
     # Ejecuta cada 2 horas de lunes a sábados:
     # Horario Argentina: 07:50, 09:50, 11:50, 13:50, 15:50, 17:50 ART
     # En UTC (+3 hs): 10:50, 12:50, 14:50, 16:50, 18:50, 20:50 UTC
+    # OJO: el schedule de GitHub es "best effort": se atrasa y a veces se saltea corridas.
+    # El disparo puntual lo hace AWS EventBridge Scheduler vía workflow_dispatch (ver README);
+    # este cron queda de respaldo (con etiquetas por entorno, un doble disparo no hace daño).
     - cron: '50 10,12,14,16,18,20 * * 1-6'
   workflow_dispatch:
     inputs:
@@ -19,7 +22,7 @@ on:
           - QA
           - PROD
           - AMBOS
-        default: QA
+        default: AMBOS
       gmail_query:
         description: 'Query opcional de Gmail (ej: subject:"Portal Clientes - Precios")'
         required: false
@@ -73,6 +76,8 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           GMAIL_SUBJECT_FILTER: ${{ secrets.GMAIL_SUBJECT_FILTER || 'Portal Clientes - Precios' }}
           GMAIL_LABEL_PROCESADO: ${{ secrets.GMAIL_LABEL_PROCESADO || 'PORTAL_PRECIOS_ACTUALIZADOS' }}
+          GMAIL_LABEL_QA: ${{ secrets.GMAIL_LABEL_QA || 'PORTAL_PRECIOS_QA' }}
+          GMAIL_LABEL_PROD: ${{ secrets.GMAIL_LABEL_PROD || 'PORTAL_PRECIOS_PROD' }}
           GMAIL_SEARCH_QUERY: ${{ github.event.inputs.gmail_query }}
         run: |
           python sync_prices_from_gmail.py
