@@ -39,7 +39,7 @@ El pipeline puede sincronizar indistintamente en **QA**, **Producción** o en **
 - **Cron Programado (`schedule`)**:
   - Corre de **Lunes a Sábados cada 2 horas** entre las 07:50 y las 17:50 hora Argentina:
     ```yaml
-    - cron: '50 10-20/2 * * 1-6' # 10:50, 12:50, 14:50, 16:50, 18:50, 20:50 UTC (UTC-3 = ART)
+    - cron: '45 10,12,14,16,18,20 * * 1-6' # 10:45 a 20:45 UTC = 07:45 a 17:45 ART (el ERP envía el correo a los :30)
     ```
   - Las ejecuciones automáticas sincronizan **solo Producción**. QA es un entorno de prueba: se actualiza a mano (**Run workflow → QA**), cuando se quiera probar.
   - **El `schedule` de GitHub no es puntual** (se atrasa horas y a veces se saltea corridas). Para horarios exactos, el disparo lo hace **AWS EventBridge Scheduler** (zona `America/Argentina/Buenos_Aires`, 07:50 a 17:50 cada 2 h, lun–sáb) llamando a:

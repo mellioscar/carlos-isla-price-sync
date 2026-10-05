@@ -8,12 +8,15 @@ on:
     # Argentina (ART) = UTC-3
     # Ejecuta cada 2 horas de lunes a sábados, SOLO para PRODUCCIÓN (QA es un entorno de prueba:
     # se actualiza manualmente con "Run workflow" eligiendo QA):
-    # Horario Argentina: 07:50, 09:50, 11:50, 13:50, 15:50, 17:50 ART
-    # En UTC (+3 hs): 10:50, 12:50, 14:50, 16:50, 18:50, 20:50 UTC
+    # Horario Argentina: 07:45, 09:45, 11:45, 13:45, 15:45, 17:45 ART
+    # En UTC (+3 hs): 10:45, 12:45, 14:45, 16:45, 18:45, 20:45 UTC
+    # El ERP envía el correo con la lista a los :30 de esas mismas horas (cron ERP: 30 7-17/2 * * 1-6),
+    # así que :45 deja 15 min de margen para que llegue, y evita los picos de carga de GitHub
+    # (inicio de cada hora), que es cuando más se atrasan o se descartan las corridas programadas.
     # OJO: el schedule de GitHub es "best effort": se atrasa y a veces se saltea corridas.
     # El disparo puntual lo hace AWS EventBridge Scheduler vía workflow_dispatch (ver README);
     # este cron queda de respaldo (con etiquetas por entorno, un doble disparo no hace daño).
-    - cron: '50 10,12,14,16,18,20 * * 1-6'
+    - cron: '45 10,12,14,16,18,20 * * 1-6'
   workflow_dispatch:
     inputs:
       target_env:
