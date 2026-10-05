@@ -36,19 +36,19 @@ El pipeline puede sincronizar indistintamente en **QA**, **Producción** o en **
     - `AMBOS`: Sincroniza primero en QA y luego en Producción.
   - Parámetro opcional `gmail_query`: Permite ingresar una búsqueda personalizada para forzar un correo específico (ej: `subject:"Lista de Precios" after:2026/09/01`).
 
-- **Cron Programado (`schedule`)**:
-  - Corre de **Lunes a Sábados cada 2 horas** entre las 07:50 y las 17:50 hora Argentina:
-    ```yaml
-    - cron: '45 10,12,14,16,18,20 * * 1-6' # 10:45 a 20:45 UTC = 07:45 a 17:45 ART (el ERP envía el correo a los :30)
-    ```
-  - Las ejecuciones automáticas sincronizan **solo Producción**. QA es un entorno de prueba: se actualiza a mano (**Run workflow → QA**), cuando se quiera probar.
-  - **El `schedule` de GitHub no es puntual** (se atrasa horas y a veces se saltea corridas). Para horarios exactos, el disparo lo hace **AWS EventBridge Scheduler** (zona `America/Argentina/Buenos_Aires`, 07:50 a 17:50 cada 2 h, lun–sáb) llamando a:
+- **Disparo automático (AWS EventBridge)** — principal:
+  - El `schedule` de GitHub Actions es *best effort* y en este repo ejecutó cerca de un tercio de las corridas esperadas (se atrasa horas o no dispara). Por eso el disparo principal lo hace una regla de **AWS EventBridge** que llama a la API `workflow_dispatch`:
     ```
     POST https://api.github.com/repos/mellioscar/carlos-isla-price-sync/actions/workflows/sync-prices-gmail.yml/dispatches
-    Authorization: Bearer <fine-grained token, solo 'Actions: write' en este repo>
     {"ref": "main", "inputs": {"target_env": "PROD"}}
     ```
-    El cron de GitHub queda como respaldo.
+  - Horario: **07:45, 09:45, 11:45, 13:45, 15:45 y 17:45 (hora de Argentina), lunes a sábado** = `cron(45 10,12,14,16,18,20 ? * MON-SAT *)` en UTC. El ERP envía el correo a los :30 de esas horas (cron del ERP: `30 7-17/2 * * 1-6`), así que quedan 15 minutos de margen.
+  - Se crea/actualiza con `aws/crear-disparador-eventbridge.sh` (instrucciones en el encabezado del script; se corre en AWS CloudShell con un token de GitHub *fine-grained* con permiso **Actions: Read and write** solo sobre este repo). **El token vence (máx. 1 año): anotar la fecha y volver a correr el script con un token nuevo para rotarlo.**
+  - Sincroniza **solo Producción**. QA es un entorno de prueba: se actualiza a mano (**Run workflow → QA**).
+- **Cron de GitHub (`schedule`)** — respaldo:
+  - Corre **cada 2 horas de lunes a sábados, a los :45**, solo Producción: `- cron: '45 10,12,14,16,18,20 * * 1-6'` (07:45 a 17:45 hora de Argentina).
+  - Si coincide con la corrida de EventBridge no hace daño: el script avisa "No hay correos pendientes" y termina en segundos. El grupo `concurrency` evita que dos corran a la vez.
+  - Para verificar que el disparo de AWS funciona: en **Actions**, las corridas de EventBridge figuran con el evento `workflow_dispatch` (las de GitHub, con `schedule`).
 
 ---
 
